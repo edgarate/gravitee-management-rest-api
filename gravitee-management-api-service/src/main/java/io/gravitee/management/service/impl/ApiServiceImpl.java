@@ -44,6 +44,7 @@ import io.gravitee.management.service.jackson.ser.api.ApiSerializer;
 import io.gravitee.management.service.notification.ApiHook;
 import io.gravitee.management.service.notification.HookScope;
 import io.gravitee.management.service.notification.NotificationParamsBuilder;
+import io.gravitee.management.service.notification.PortalHook;
 import io.gravitee.management.service.processor.ApiSynchronizationProcessor;
 import io.gravitee.management.service.search.SearchEngineService;
 import io.gravitee.management.service.search.query.Query;
@@ -54,6 +55,7 @@ import io.gravitee.repository.management.api.MembershipRepository;
 import io.gravitee.repository.management.api.search.ApiCriteria;
 import io.gravitee.repository.management.api.search.ApiFieldExclusionFilter;
 import io.gravitee.repository.management.model.Api;
+import io.gravitee.repository.management.model.ApiLifecycleState;
 import io.gravitee.repository.management.model.Visibility;
 import io.gravitee.repository.management.model.*;
 import org.apache.commons.io.IOUtils;
@@ -75,6 +77,9 @@ import java.util.stream.Stream;
 import static io.gravitee.management.model.EventType.PUBLISH_API;
 import static io.gravitee.management.model.ImportSwaggerDescriptorEntity.Type.INLINE;
 import static io.gravitee.management.model.PageType.SWAGGER;
+import static io.gravitee.management.model.WorkflowReferenceType.API;
+import static io.gravitee.management.model.WorkflowState.DRAFT;
+import static io.gravitee.management.model.WorkflowType.REVIEW;
 import static io.gravitee.repository.management.model.Api.AuditEvent.*;
 import static io.gravitee.repository.management.model.Visibility.PUBLIC;
 import static java.util.Collections.*;
@@ -139,6 +144,8 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
     private ParameterService parameterService;
     @Autowired
     private TagService tagService;
+    @Autowired
+    private WorkflowService workflowService;
 
     private static final Pattern LOGGING_MAX_DURATION_PATTERN = Pattern.compile("(?<before>.*)\\#request.timestamp\\s*\\<\\=?\\s*(?<timestamp>\\d*)l(?<after>.*)");
     private static final String LOGGING_MAX_DURATION_CONDITION = "#request.timestamp <= %dl";
@@ -366,6 +373,11 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
                     repoApi.setGroups(defaultGroups);
                 } else if (!defaultGroups.isEmpty()) {
                     repoApi.getGroups().addAll(defaultGroups);
+                }
+
+                repoApi.setApiLifecycleState(ApiLifecycleState.CREATED);
+                if (parameterService.findAsBoolean(Key.API_REVIEW_ENABLED)) {
+                    workflowService.create(API, id, REVIEW, userId, DRAFT, "");
                 }
 
                 Api createdApi = apiRepository.create(repoApi);
@@ -609,9 +621,6 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
                 throw new ApiNotFoundException(apiId);
             }
 
-            // if user changes sharding tags, then check if he is allowed to do it
-            checkShardingTags(updateApiEntity, convert(optApiToUpdate.get()));
-
             // check if context path is unique
             checkContextPath(updateApiEntity.getProxy().getContextPath(), apiId);
 
@@ -619,6 +628,14 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
             checkEndpointsName(updateApiEntity);
 
             addLoggingMaxDuration(updateApiEntity.getProxy().getLogging());
+
+            final ApiEntity apiToCheck = convert(optApiToUpdate.get());
+
+            // if user changes sharding tags, then check if he is allowed to do it
+            checkShardingTags(updateApiEntity, apiToCheck);
+
+            // check lifecycle state
+            checkLifecycleState(updateApiEntity, apiToCheck);
 
             // check the existence of groups
             if (updateApiEntity.getGroups() != null && !updateApiEntity.getGroups().isEmpty()) {
@@ -700,6 +717,26 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
                     final String[] notAllowedTags = updatedTags.stream().filter(tag -> !userTags.contains(tag)).toArray(String[]::new);
                     throw new TagNotAllowedException(notAllowedTags);
                 }
+            }
+        }
+    }
+
+    private void checkLifecycleState(final UpdateApiEntity updateApiEntity, final ApiEntity existingAPI) {
+        if (io.gravitee.management.model.api.ApiLifecycleState.ARCHIVED.equals(existingAPI.getLifecycleState())) {
+            if (!io.gravitee.management.model.api.ApiLifecycleState.ARCHIVED.equals(updateApiEntity.getLifecycleState())) {
+                throw new LifecycleStateChangeNotAllowedException(updateApiEntity.getLifecycleState().name());
+            }
+        } else if (io.gravitee.management.model.api.ApiLifecycleState.DEPRECATED.equals(existingAPI.getLifecycleState())) {
+            if (!io.gravitee.management.model.api.ApiLifecycleState.UNPUBLISHED.equals(updateApiEntity.getLifecycleState())) {
+                throw new LifecycleStateChangeNotAllowedException(updateApiEntity.getLifecycleState().name());
+            }
+        } else if (io.gravitee.management.model.api.ApiLifecycleState.UNPUBLISHED.equals(existingAPI.getLifecycleState())) {
+            if (io.gravitee.management.model.api.ApiLifecycleState.CREATED.equals(updateApiEntity.getLifecycleState())) {
+                throw new LifecycleStateChangeNotAllowedException(updateApiEntity.getLifecycleState().name());
+            }
+        } else if (io.gravitee.management.model.api.ApiLifecycleState.CREATED.equals(existingAPI.getLifecycleState())) {
+            if (WorkflowState.IN_REVIEW.equals(existingAPI.getWorkflowState())) {
+                throw new LifecycleStateChangeNotAllowedException(updateApiEntity.getLifecycleState().name());
             }
         }
     }
@@ -1252,6 +1289,7 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
         apiModelEntity.setPrimaryOwner(apiEntity.getPrimaryOwner());
         apiModelEntity.setProperties(apiEntity.getProperties());
         apiModelEntity.setProxy(apiEntity.getProxy());
+        apiModelEntity.setLifecycleState(apiEntity.getLifecycleState());
 
         final List<ApiMetadataEntity> metadataList = apiMetadataService.findAllByApi(apiId);
 
@@ -1333,6 +1371,38 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
             return entities;
     }
 
+    @Override
+    public ApiEntity askForReview(final String apiId, final String userId, final ReviewEntity reviewEntity) {
+        LOGGER.debug("Ask for review API {}", apiId);
+        return updateWorkflowReview(apiId, userId, PortalHook.ASK_FOR_REVIEW, WorkflowState.IN_REVIEW, reviewEntity.getMessage());
+    }
+
+    @Override
+    public ApiEntity acceptReview(final String apiId, final String userId, final ReviewEntity reviewEntity) {
+        LOGGER.debug("Accept review API {}", apiId);
+        return updateWorkflowReview(apiId, userId, PortalHook.REVIEW_OK, WorkflowState.REVIEW_OK, reviewEntity.getMessage());
+    }
+
+    @Override
+    public ApiEntity rejectReview(final String apiId, final String userId, final ReviewEntity reviewEntity) {
+        LOGGER.debug("Reject review API {}", apiId);
+        return updateWorkflowReview(apiId, userId, PortalHook.REQUEST_FOR_CHANGES, WorkflowState.REQUEST_FOR_CHANGES, reviewEntity.getMessage());
+    }
+
+    private ApiEntity updateWorkflowReview(final String apiId, final String userId, final PortalHook hook,
+                                           final WorkflowState workflowState, final String workflowMessage) {
+        workflowService.create(API, apiId, REVIEW, userId, workflowState, workflowMessage);
+        final ApiEntity apiEntity = findById(apiId);
+        apiEntity.setWorkflowState(workflowState);
+
+        notifierService.trigger(hook,
+                new NotificationParamsBuilder()
+                        .api(apiEntity)
+                        .user(userService.findById(userId))
+                        .build());
+        return apiEntity;
+    }
+
     private ApiCriteria.Builder queryToCriteria(ApiQuery query) {
         final ApiCriteria.Builder builder = new ApiCriteria.Builder();
         if (query == null) {
@@ -1351,6 +1421,11 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
         }
         if (query.getVisibility() != null) {
             builder.visibility(Visibility.valueOf(query.getVisibility().name()));
+        }
+        if (query.getLifecycleStates() != null) {
+            builder.lifecycleStates(query.getLifecycleStates().stream()
+                    .map(apiLifecycleState -> ApiLifecycleState.valueOf(apiLifecycleState.name()))
+                    .collect(toList()));
         }
 
         return builder;
@@ -1526,9 +1601,9 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
         apiEntity.setViews(api.getViews());
         apiEntity.setLabels(api.getLabels());
 
-        final LifecycleState lifecycleState = api.getLifecycleState();
-        if (lifecycleState != null) {
-            apiEntity.setState(Lifecycle.State.valueOf(lifecycleState.name()));
+        final LifecycleState state = api.getLifecycleState();
+        if (state != null) {
+            apiEntity.setState(Lifecycle.State.valueOf(state.name()));
         }
         if (api.getVisibility() != null) {
             apiEntity.setVisibility(io.gravitee.management.model.Visibility.valueOf(api.getVisibility().toString()));
@@ -1536,6 +1611,17 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
 
         if (primaryOwner != null) {
             apiEntity.setPrimaryOwner(new PrimaryOwnerEntity(primaryOwner));
+        }
+        final ApiLifecycleState lifecycleState = api.getApiLifecycleState();
+        if (lifecycleState != null) {
+            apiEntity.setLifecycleState(io.gravitee.management.model.api.ApiLifecycleState.valueOf(lifecycleState.name()));
+        }
+
+        if (parameterService.findAsBoolean(Key.API_REVIEW_ENABLED)) {
+            final List<Workflow> workflows = workflowService.findByReferenceAndType(API, api.getId(), REVIEW);
+            if (workflows != null && !workflows.isEmpty()) {
+                apiEntity.setWorkflowState(WorkflowState.valueOf(workflows.get(0).getState()));
+            }
         }
 
         return apiEntity;
@@ -1580,6 +1666,9 @@ public class ApiServiceImpl extends AbstractService implements ApiService {
 
             String definition = objectMapper.writeValueAsString(apiDefinition);
             api.setDefinition(definition);
+            if (updateApiEntity.getLifecycleState() != null) {
+                api.setApiLifecycleState(ApiLifecycleState.valueOf(updateApiEntity.getLifecycleState().name()));
+            }
             return api;
         } catch (JsonProcessingException jse) {
             LOGGER.error("Unexpected error while generating API definition", jse);

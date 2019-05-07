@@ -27,7 +27,10 @@ public enum PortalHook implements Hook {
     PASSWORD_RESET("Password Reset", "Triggered when a password is reset", "USER"),
     NEW_SUPPORT_TICKET("New Support Ticket", "Triggered when a new support ticket is created", "SUPPORT"),
     GROUP_INVITATION("Group invitation", "Triggered when an user is invited in a group", "GROUP"),
-    MESSAGE(null, null, null, true);
+    MESSAGE(null, null, null, true),
+    ASK_FOR_REVIEW("Ask for API review", "Triggered when an API can be reviewed", "REVIEW"),
+    REVIEW_OK("Accept API review", "Triggered when an API's review has been accepted", "REVIEW"),
+    REQUEST_FOR_CHANGES("Reject API review", "Triggered when an API's review has been rejected", "REVIEW");
 
     private String label;
     private String description;

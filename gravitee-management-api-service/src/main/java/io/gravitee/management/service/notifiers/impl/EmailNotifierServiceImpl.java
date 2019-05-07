@@ -159,6 +159,15 @@ public class EmailNotifierServiceImpl implements EmailNotifierService {
         else if (hook.equals(PortalHook.NEW_SUPPORT_TICKET)) {
             return EmailNotificationBuilder.EmailTemplate.SUPPORT_TICKET_NOTIFICATION;
         }
+        else if (hook.equals(PortalHook.ASK_FOR_REVIEW)) {
+            return EmailNotificationBuilder.EmailTemplate.ASK_FOR_REVIEW;
+        }
+        else if (hook.equals(PortalHook.REQUEST_FOR_CHANGES)) {
+            return EmailNotificationBuilder.EmailTemplate.REQUEST_FOR_CHANGES;
+        }
+        else if (hook.equals(PortalHook.REVIEW_OK)) {
+            return EmailNotificationBuilder.EmailTemplate.REVIEW_OK;
+        }
 
         // Unknown Hook
         return null;
@@ -309,6 +318,15 @@ public class EmailNotifierServiceImpl implements EmailNotifierService {
         }
         else if (hook.equals(PortalHook.NEW_SUPPORT_TICKET)) {
             return "New Support Ticket by " + params.get(NotificationParamsBuilder.PARAM_USERNAME);
+        }
+        else if (hook.equals(PortalHook.ASK_FOR_REVIEW)) {
+            return "Review asked";
+        }
+        else if (hook.equals(PortalHook.REQUEST_FOR_CHANGES)) {
+            return "Request for changes on API";
+        }
+        else if (hook.equals(PortalHook.REVIEW_OK)) {
+            return "API review accepted";
         }
 
         // Unknown Hook
